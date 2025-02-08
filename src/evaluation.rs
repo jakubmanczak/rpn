@@ -7,15 +7,11 @@ pub enum EvaluationResult {
     FoundNonOperator(char),
     FoundNonDigit(char),
     InputNumberOverflow,
+    DivByZero,
     Overflow {
         last_valid_value1: i32,
         last_valid_value2: i32,
-        attempted_operation: char,
-    },
-    Underflow {
-        last_valid_value1: i32,
-        last_valid_value2: i32,
-        attempted_operation: char,
+        attempted_operation: RpnOperator,
     },
 }
 
@@ -37,15 +33,37 @@ impl EvaluationStep {
     }
 }
 
-pub trait RpnOperator {
+#[derive(Debug, PartialEq)]
+pub enum RpnOperator {
+    Addition,
+    Subtraction,
+    Multiplication,
+    Division,
+}
+
+impl TryFrom<char> for RpnOperator {
+    type Error = EvaluationResult;
+
+    fn try_from(value: char) -> Result<Self, Self::Error> {
+        match value {
+            '+' => Ok(RpnOperator::Addition),
+            '-' => Ok(RpnOperator::Subtraction),
+            '*' => Ok(RpnOperator::Multiplication),
+            '/' => Ok(RpnOperator::Division),
+            _ => Err(EvaluationResult::FoundNonOperator(value)),
+        }
+    }
+}
+
+pub trait IntoRpnOperator {
     fn is_valid_rpn_operator(&self) -> bool;
 }
 
-impl RpnOperator for char {
+impl IntoRpnOperator for char {
     fn is_valid_rpn_operator(&self) -> bool {
-        match self {
-            '+' | '-' => true,
-            _ => false,
+        match RpnOperator::try_from(*self) {
+            Ok(_) => true,
+            Err(_) => false,
         }
     }
 }
@@ -90,36 +108,67 @@ pub fn evaluate_rpn(input: &str) -> EvaluationResult {
                 }
                 S::ReadingOperator => return ER::FoundNonOperator(c),
             },
-            c if c.is_valid_rpn_operator() => match step {
-                S::ReadingOperator => match c {
-                    '+' => {
-                        value1 = match value1.checked_add(value2) {
-                            Some(value1) => value1,
-                            None => {
-                                return ER::Overflow {
-                                    last_valid_value1: value1,
-                                    last_valid_value2: value2,
-                                    attempted_operation: c,
+            c if c.is_valid_rpn_operator() => {
+                use RpnOperator as OP;
+                let o = OP::try_from(c).unwrap();
+                match step {
+                    S::ReadingOperator => match o {
+                        OP::Addition => {
+                            value1 = match value1.checked_add(value2) {
+                                Some(res) => res,
+                                None => {
+                                    return ER::Overflow {
+                                        last_valid_value1: value1,
+                                        last_valid_value2: value2,
+                                        attempted_operation: o,
+                                    }
                                 }
                             }
                         }
-                    }
-                    '-' => {
-                        value1 = match value1.checked_sub(value2) {
-                            Some(value2) => value2,
-                            None => {
-                                return ER::Underflow {
-                                    last_valid_value1: value1,
-                                    last_valid_value2: value2,
-                                    attempted_operation: c,
+                        OP::Subtraction => {
+                            value1 = match value1.checked_sub(value2) {
+                                Some(res) => res,
+                                None => {
+                                    return ER::Overflow {
+                                        last_valid_value1: value1,
+                                        last_valid_value2: value2,
+                                        attempted_operation: o,
+                                    }
                                 }
                             }
                         }
-                    }
-                    _ => unreachable!(),
-                },
-                S::ReadingValue1 | S::ReadingValue2 => return ER::FoundNonDigit(c),
-            },
+                        OP::Multiplication => {
+                            value1 = match value1.checked_mul(value2) {
+                                Some(res) => res,
+                                None => {
+                                    return ER::Overflow {
+                                        last_valid_value1: value1,
+                                        last_valid_value2: value2,
+                                        attempted_operation: o,
+                                    }
+                                }
+                            }
+                        }
+                        OP::Division => {
+                            value1 = match value1.checked_div(value2) {
+                                Some(res) => res,
+                                None => {
+                                    if value2 == 0 {
+                                        return ER::DivByZero;
+                                    } else {
+                                        return ER::Overflow {
+                                            last_valid_value1: value1,
+                                            last_valid_value2: value2,
+                                            attempted_operation: o,
+                                        };
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    S::ReadingValue1 | S::ReadingValue2 => return ER::FoundNonDigit(c),
+                }
+            }
             invalid => return ER::InvalidCharacterFound(invalid),
         }
     }
@@ -202,5 +251,53 @@ mod tests {
     fn complex_addition_and_subtraction() {
         let input = "2 3 + 4 + 5 + 144 - 45 + 3 + 3434 - 34 - 34 - 3455 + 129 +";
         assert_eq!(evaluate_rpn(input), ER::Success(0));
+    }
+
+    #[test]
+    fn one_times_one() {
+        let input = " 1 1 * ";
+        assert_eq!(evaluate_rpn(input), ER::Success(1));
+    }
+
+    #[test]
+    fn thirteen_times_fifty_seven() {
+        let input = "13 57 *";
+        assert_eq!(evaluate_rpn(input), ER::Success(741));
+    }
+
+    #[test]
+    fn one_times_two_thousand_and_five() {
+        let input = "1 2005 *";
+        assert_eq!(evaluate_rpn(input), ER::Success(2005));
+    }
+
+    #[test]
+    fn negative_multiplication() {
+        let input = "0 5 - 25 *";
+        assert_eq!(evaluate_rpn(input), ER::Success(-125));
+    }
+
+    #[test]
+    fn chain_multiplication() {
+        let input = "1 2 * 3 * 4 * 5 * 6 * 7 *";
+        assert_eq!(evaluate_rpn(input), ER::Success(5040));
+    }
+
+    #[test]
+    fn negative_chain_multiplication() {
+        let input = "0 1 - 2 * 3 * 4 * 5 * 6 * 7 *";
+        assert_eq!(evaluate_rpn(input), ER::Success(-5040));
+    }
+
+    #[test]
+    fn divide_by_zero() {
+        let input = "5040 0 /";
+        assert_eq!(evaluate_rpn(input), ER::DivByZero);
+    }
+
+    #[test]
+    fn divide_two_thousand_and_four_by_six() {
+        let input = "2004 6 /";
+        assert_eq!(evaluate_rpn(input), ER::Success(334));
     }
 }
